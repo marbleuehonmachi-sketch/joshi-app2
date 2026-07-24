@@ -1,0 +1,991 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>３ごぶん じょし２</title>
+<style>
+  html, body { margin:0; padding:0; }
+</style>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useMemo } = React;
+
+// ─── 音声読み上げ ─────────────────────────────────────────────
+function speak(text, rate = 0.85) {
+  if (!window.speechSynthesis) return;
+  window.speechSynthesis.cancel();
+  const utter = new SpeechSynthesisUtterance(text);
+  utter.lang = "ja-JP"; utter.rate = rate; utter.pitch = 1.1;
+  const voices = window.speechSynthesis.getVoices();
+  const jaVoice = voices.find(v => v.lang.startsWith("ja"));
+  if (jaVoice) utter.voice = jaVoice;
+  window.speechSynthesis.speak(utter);
+}
+
+function speakWithPauses(q) {
+  if (!window.speechSynthesis) return;
+  window.speechSynthesis.cancel();
+  const voices = window.speechSynthesis.getVoices();
+  const jaVoice = voices.find(v => v.lang.startsWith("ja"));
+  const makeUtter = (text, rate=0.85) => {
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang="ja-JP"; u.rate=rate; u.pitch=1.1;
+    if(jaVoice) u.voice=jaVoice;
+    return u;
+  };
+  // sentence: [word1, blank1, word2, blank2, verb]
+  // read word1, pause, word2, pause, verb
+  const parts = q.sentence.filter((_, i) => i % 2 === 0); // words only
+  if (parts.length === 0) return;
+  const speak_sequence = (idx) => {
+    if (idx >= parts.length) return;
+    const u = makeUtter(parts[idx]);
+    u.onend = () => setTimeout(() => speak_sequence(idx+1), idx < parts.length-1 ? 700 : 0);
+    window.speechSynthesis.speak(u);
+  };
+  speak_sequence(0);
+}
+
+// ─── 問題データはGoogleスプレッドシートから読み込みます（下の「データ読み込み」セクション参照） ───
+const CAT_CONFIG = {
+  A: { label:"だれが・どこで", color:"#FF6B6B", bg:"#fff0f0", desc:"〜が〜で〜する" },
+  B: { label:"どこで・なにを", color:"#E8654A", bg:"#fff3f0", desc:"〜で〜をする" },
+  C: { label:"だれに・なにを", color:"#4A9EDB", bg:"#f0f7ff", desc:"〜に〜をする" },
+  D: { label:"なにと・なにを", color:"#00B5A3", bg:"#f0fffe", desc:"〜と〜をする" },
+  E: { label:"だれが・なにを", color:"#E6A800", bg:"#fffbea", desc:"〜が〜をする" },
+  F: { label:"どこに・なにを", color:"#9B59B6", bg:"#f5f0ff", desc:"〜に〜をいれる" },
+};
+
+// 選択肢のルールは choices シートから読み込む（読み込み前のフォールバック用に初期値を持たせておく）
+let CHOICES_RULES = [
+  { particle:"が", category:"", choices:["が","に","で","も"] },
+  { particle:"を", category:"", choices:["を","も","へ","に"] },
+  { particle:"は", category:"", choices:["は","に","で","も"] },
+  { particle:"に", category:"", choices:["に","で","も","と"] },
+  { particle:"で", category:"", choices:["で","は","も","へ"] },
+  { particle:"と", category:"", choices:["と","も","へ","は"] },
+  { particle:"を", category:"D", choices:["を","へ","に","と"] },
+  { particle:"を", category:"F", choices:["を","へ","に","と"] },
+];
+
+// 正解の助詞・カテゴリーから、選択肢の候補を決める
+// （カテゴリー専用ルールがあればそれを優先し、なければ共通ルールを使う）
+function getChoicesFor(answer, catId) {
+  const specific = CHOICES_RULES.find(r => r.particle===answer && r.category===catId);
+  if (specific) return specific.choices;
+  const general = CHOICES_RULES.find(r => r.particle===answer && r.category==="");
+  if (general) return general.choices;
+  return ["が","を","に","で"];
+}
+
+// 助詞とカテゴリーから「だれに／なにを」などの問いかけ言葉を決める
+function getRoleQuestion(particle, catId) {
+  switch (particle) {
+    case "を": return "なにを";
+    case "が": return "だれが";
+    case "で": return "どこで";
+    case "と": return "なにと";
+    case "に": return catId === "F" ? "どこに" : "だれに";
+    default:   return "";
+  }
+}
+
+// 問題文（動詞）とフェーズから、ヒントの文章を組み立てる
+function buildHintText(q, phase) {
+  if (!q) return "";
+  const particle = phase === 1 ? q.answer1 : q.answer2;
+  const verbRaw = q.sentence[q.sentence.length - 1] || "";
+  const verb = verbRaw.replace(/。$/, "");
+  const role = getRoleQuestion(particle, q.cat);
+  return `${role}　${verb}か？`;
+}
+
+function shuffle(arr) {
+  const a = [...arr];
+  for (let i = a.length-1; i > 0; i--) {
+    const j = Math.floor(Math.random()*(i+1));
+    [a[i],a[j]]=[a[j],a[i]];
+  }
+  return a;
+}
+
+const HISTORY_KEY = "joshi-history-v1";
+
+// ブラウザのlocalStorageに保存（この端末・このブラウザに保存されます）
+async function loadHistory() {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch (e) {
+    // 保存データがない・壊れている場合など
+  }
+  return { sessions: [], questionStats: {} };
+}
+
+async function saveHistory(h) {
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(h));
+    return true;
+  } catch (e) {
+    console.error("きろくの保存に失敗しました", e);
+    return false;
+  }
+}
+
+// 全問題をidから引けるようにしておく（記録画面での文章表示用。データ読み込み後に作り直す）
+let ALL_QUESTIONS = {};
+let QUESTION_LOOKUP = {};
+
+// ─── データ読み込み（Googleスプレッドシート連携） ─────────────────
+// スプレッドシートを「リンクを知っている全員が閲覧可」で共有し、
+// 下のSHEET_IDにスプレッドシートのID（URLの /d/ と /edit の間の文字列）を入れると、
+// アプリ起動時にそのシートから問題データ・選択肢ルールを読み込みます。
+// 空のままなら、内蔵データ（下のDEFAULT_QUESTIONS_CSV／DEFAULT_CHOICES_CSV）で動作します。
+const SHEET_CONFIG = {
+  SHEET_ID: "1i-B4K0QuI9LTXvPG8gfrSGmL-OEzWMhuBsn51MNOWXM",
+  QUESTIONS_GID: "0",             // questionsタブのgid
+  CHOICES_GID: "1021656975",      // choicesタブのgid
+};
+
+function buildSheetCsvUrl(gid) {
+  if (!SHEET_CONFIG.SHEET_ID || gid === "" || gid === undefined) return null;
+  return `https://docs.google.com/spreadsheets/d/${SHEET_CONFIG.SHEET_ID}/export?format=csv&gid=${gid}`;
+}
+
+// 内蔵データ（スプレッドシート未設定時・取得失敗時のフォールバック）
+const DEFAULT_QUESTIONS_CSV = `category,word1,word2,verb,particle1,particle2,image,reverse
+A,ねこ,にわ,あそびます。,が,で,images/a01_cat_garden.png,yes
+A,いぬ,こうえん,はしります。,が,で,images/a02_dog_park.png,yes
+A,さかな,うみ,およぎます。,が,で,images/a03_fish_sea.png,yes
+A,とり,きのうえ,うたいます。,が,で,images/a04_bird_branch.png,yes
+A,こども,プール,あそびます。,が,で,images/a05_child_pool.png,yes
+A,うさぎ,はたけ,はねます。,が,で,images/a06_rabbit_field.png,yes
+A,ねずみ,いえ,かくれます。,が,で,images/a07_mouse_house.png,yes
+A,カエル,かわ,およぎます。,が,で,images/a08_frog_river.png,yes
+A,おとうさん,へや,ねころびます。,が,で,images/a09_father_room.png,yes
+A,ぞう,みず,あそびます。,が,で,images/a10_elephant_water.png,yes
+A,こども,グラウンド,はしります。,が,で,images/a11_child_ground.png,yes
+A,いぬ,にわ,ねます。,が,で,images/a12_dog_garden_sleep.png,yes
+A,ねこ,へや,あそびます。,が,で,images/a13_cat_room.png,yes
+A,さる,き,あそびます。,が,で,images/a14_monkey_tree.png,yes
+A,くじら,うみ,およぎます。,が,で,images/a15_whale_sea.png,yes
+A,ライオン,さばく,はしります。,が,で,images/a16_lion_desert.png,yes
+A,はと,こうえん,あるきます。,が,で,images/a17_pigeon_park.png,yes
+A,たぬき,もり,かくれます。,が,で,images/a18_tanuki_forest.png,yes
+A,ハムスター,かご,ねています。,が,で,images/a19_hamster_cage.png,yes
+A,くま,もり,あそびます。,が,で,images/a20_bear_forest.png,yes
+B,としょかん,ほん,よみます。,で,を,images/b01_library.png,yes
+B,だいどころ,りょうり,します。,で,を,images/b02_cooking.png,yes
+B,がっこう,べんきょう,します。,で,を,images/b03_study.png,yes
+B,こうえん,サッカー,します。,で,を,images/b04_soccer.png,yes
+B,うみ,シュノーケル,します。,で,を,images/b05_snorkel.png,yes
+B,きょうしつ,え,かきます。,で,を,images/b06_drawing.png,yes
+B,たいいくかん,うんどう,します。,で,を,images/b07_gym.png,yes
+B,プール,クロール,れんしゅうします。,で,を,images/b08_swim.png,yes
+B,へや,ほん,よみます。,で,を,images/b09_reading_room.png,yes
+B,やま,さんぽ,します。,で,を,images/b10_hiking.png,yes
+B,こうえん,なわとび,します。,で,を,images/b11_jumprope.png,yes
+B,キッチン,おかし,つくります。,で,を,images/b12_baking.png,yes
+B,グラウンド,リレー,します。,で,を,images/b13_relay.png,yes
+B,うち,ゲーム,します。,で,を,images/b14_game.png,yes
+B,がっこう,うた,うたいます。,で,を,images/b15_singing.png,yes
+B,にわ,はな,そだてます。,で,を,images/b16_watering.png,yes
+B,スタジアム,やきゅう,みます。,で,を,images/b17_baseball.png,yes
+B,うみ,すいか,たべます。,で,を,images/b18_watermelon.png,yes
+B,こうえん,おにごっこ,します。,で,を,images/b19_tag.png,yes
+B,へや,おんがく,ききます。,で,を,images/b20_music.png,yes
+C,ともだち,てがみ,かきます。,に,を,images/c01_friend_letter.png,yes
+C,いぬ,えさ,あげます。,に,を,images/c02_dog_food.png,yes
+C,せんせい,しつもん,します。,に,を,images/c03_teacher_question.png,yes
+C,ともだち,ほん,かします。,に,を,images/c04_friend_book_lend.png,yes
+C,いもうと,おかし,わたします。,に,を,images/c05_sister_snack.png,yes
+C,おとうと,ボール,なげます。,に,を,images/c06_brother_ball.png,yes
+C,おじいさん,はな,わたします。,に,を,images/c07_grandpa_flower.png,yes
+C,ともだち,てつだい,たのみます。,に,を,images/c08_friend_favor.png,yes
+C,いぬ,ボール,なげます。,に,を,images/c09_dog_ball.png,yes
+C,ねこ,えさ,あげます。,に,を,images/c10_cat_food.png,yes
+C,おじいさん,でんわ,かけます。,に,を,images/c11_grandpa_call.png,yes
+C,せんせい,ノート,だします。,に,を,images/c12_teacher_notebook.png,yes
+C,ともだち,かさ,かします。,に,を,images/c13_friend_umbrella.png,yes
+C,おかあさん,プレゼント,わたします。,に,を,images/c14_mother_present.png,yes
+C,おとうと,おかし,わたします。,に,を,images/c15_brother_snack.png,yes
+C,ともだち,ひみつ,はなします。,に,を,images/c16_friend_secret.png,yes
+C,せんせい,えがお,みせます。,に,を,images/c17_teacher_smile.png,yes
+C,おかあさん,てがみ,かきます。,に,を,images/c18_mother_letter.png,yes
+C,いぬ,みず,あげます。,に,を,images/c19_dog_water.png,yes
+D,パン,ぎゅうにゅう,たべます。,と,を,images/d01_bread_milk.png,no
+D,いぬ,ねこ,みます。,と,を,images/d02_dog_cat.png,no
+D,りんご,バナナ,かいます。,と,を,images/d03_apple_banana.png,no
+D,えんぴつ,けしごむ,つかいます。,と,を,images/d04_pencil_eraser.png,no
+D,ぼうし,かばん,もちます。,と,を,images/d05_hat_bag.png,no
+D,ジュース,おかし,たべます。,と,を,images/d06_juice_snack.png,no
+D,ほん,ノート,よみます。,と,を,images/d07_book_notebook.png,no
+D,くつ,くつした,はきます。,と,を,images/d08_shoes_socks.png,no
+D,おにぎり,みそしる,たべます。,と,を,images/d09_onigiri_soup.png,no
+D,えほん,ぬいぐるみ,もちます。,と,を,images/d10_picturebook_teddy.png,no
+D,ぶどう,いちご,たべます。,と,を,images/d11_grape_strawberry.png,no
+D,コップ,おさら,あらいます。,と,を,images/d12_cup_plate.png,no
+D,チョコ,クッキー,たべます。,と,を,images/d13_choco_cookie.png,no
+D,にんじん,たまねぎ,きります。,と,を,images/d14_carrot_onion.png,no
+D,ボール,バット,もちます。,と,を,images/d15_ball_bat.png,no
+D,すいか,メロン,たべます。,と,を,images/d16_watermelon_melon.png,no
+D,まんが,ざっし,よみます。,と,を,images/d17_manga_magazine.png,no
+D,かさ,レインコート,もちます。,と,を,images/d18_umbrella_raincoat.png,no
+D,タオル,せっけん,つかいます。,と,を,images/d19_towel_soap.png,no
+D,ふく,ズボン,きます。,と,を,images/d20_shirt_pants.png,no
+E,いぬ,ボール,おいかけます。,が,を,images/e01_dog_ball_chase.png,yes
+E,ねこ,さかな,たべます。,が,を,images/e02_cat_fish.png,yes
+E,こども,えほん,よみます。,が,を,images/e03_child_picturebook.png,yes
+E,おかあさん,りょうり,します。,が,を,images/e04_mother_cooking.png,yes
+E,とり,えさ,たべます。,が,を,images/e05_bird_food.png,yes
+E,ぞう,みず,のみます。,が,を,images/e06_elephant_water_drink.png,yes
+E,うさぎ,にんじん,たべます。,が,を,images/e07_rabbit_carrot.png,yes
+E,おとうさん,しんぶん,よみます。,が,を,images/e08_father_newspaper.png,yes
+E,こども,うた,うたいます。,が,を,images/e09_child_singing.png,yes
+E,いぬ,ほね,かじります。,が,を,images/e10_dog_bone.png,yes
+E,さる,バナナ,たべます。,が,を,images/e11_monkey_banana.png,yes
+E,くま,みつ,なめます。,が,を,images/e12_bear_honey.png,yes
+E,こども,おかし,たべます。,が,を,images/e13_child_snack.png,yes
+E,おかあさん,ケーキ,やきます。,が,を,images/e14_mother_cake.png,yes
+E,おとうと,ゲーム,します。,が,を,images/e15_brother_game.png,yes
+E,いもうと,えほん,よみます。,が,を,images/e16_sister_picturebook.png,yes
+E,こども,ジュース,のみます。,が,を,images/e17_child_juice.png,yes
+E,ねこ,ボール,おいかけます。,が,を,images/e18_cat_ball_chase.png,yes
+E,おとうさん,コーヒー,のみます。,が,を,images/e19_father_coffee.png,yes
+E,こども,えんぴつ,つかいます。,が,を,images/e20_child_pencil.png,yes
+F,はこ,おもちゃ,いれます。,に,を,images/f01_box_toy.png,yes
+F,つくえ,ほん,おきます。,に,を,images/f02_desk_book.png,yes
+F,たな,コップ,ならべます。,に,を,images/f03_shelf_cup.png,yes
+F,かばん,きょうかしょ,いれます。,に,を,images/f04_bag_textbook.png,yes
+F,れいぞうこ,たまご,しまいます。,に,を,images/f05_fridge_egg.png,yes
+F,かべ,え,かざります。,に,を,images/f06_wall_picture.png,yes
+F,ポスト,てがみ,いれます。,に,を,images/f07_postbox_letter.png,yes
+F,テーブル,コップ,おきます。,に,を,images/f08_table_cup.png,yes
+F,ゴミばこ,ゴミ,すてます。,に,を,images/f09_trashbin_trash.png,yes
+F,プランター,はな,うえます。,に,を,images/f10_planter_flower.png,yes
+F,ランドセル,ほん,いれます。,に,を,images/f11_schoolbag_book.png,yes
+F,かみ,じ,かきます。,に,を,images/f12_paper_letter_write.png,yes
+F,びん,みず,いれます。,に,を,images/f13_bottle_water.png,yes
+F,バッグ,さいふ,しまいます。,に,を,images/f14_bag_wallet.png,yes
+F,ふくろ,パン,いれます。,に,を,images/f15_bag_bread.png,yes
+F,はな,みず,あげます。,に,を,images/f16_flower_water.png,yes
+F,いす,クッション,おきます。,に,を,images/f17_chair_cushion.png,yes
+F,ポケット,てがみ,いれます。,に,を,images/f18_pocket_letter.png,yes
+F,まど,シール,はります。,に,を,images/f19_window_sticker.png,yes
+F,かご,くだもの,いれます。,に,を,images/f20_basket_fruit.png,yes`;
+
+const DEFAULT_CHOICES_CSV = `particle,category,choices
+が,,"が,に,で,も"
+を,,"を,も,へ,に"
+は,,"は,に,で,も"
+に,,"に,で,も,と"
+で,,"で,は,も,へ"
+と,,"と,も,へ,は"
+を,D,"を,へ,に,と"
+を,F,"を,へ,に,と"`;
+
+// ごく簡易的なCSVパーサー（ダブルクォートで囲まれた中のカンマに対応）
+function parseCsv(text) {
+  const rows = [];
+  let row = [], field = "", inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i+1] === '"') { field += '"'; i++; }
+        else inQuotes = false;
+      } else field += c;
+    } else {
+      if (c === '"') inQuotes = true;
+      else if (c === ',') { row.push(field); field = ""; }
+      else if (c === '\n' || c === '\r') {
+        if (c === '\r' && text[i+1] === '\n') i++;
+        row.push(field); field = "";
+        if (row.length > 1 || row[0] !== "") rows.push(row);
+        row = [];
+      } else field += c;
+    }
+  }
+  if (field !== "" || row.length > 0) { row.push(field); rows.push(row); }
+  if (rows.length === 0) return [];
+  const header = rows[0].map(h => h.trim());
+  return rows.slice(1).map(r => {
+    const obj = {};
+    header.forEach((h, i) => { obj[h] = (r[i] || "").trim(); });
+    return obj;
+  });
+}
+
+function buildAllQuestionsFromRows(rows) {
+  const grouped = {};
+  rows.forEach(row => {
+    const cat = (row.category || "").trim();
+    if (!cat) return;
+    (grouped[cat] = grouped[cat] || []).push(row);
+  });
+  const all = {};
+  Object.keys(grouped).forEach(cat => {
+    const list = [];
+    grouped[cat].forEach((row, i) => {
+      const w1 = (row.word1 || "").trim();
+      const w2 = (row.word2 || "").trim();
+      const verb = (row.verb || "").trim();
+      const p1 = (row.particle1 || "").trim();
+      const p2 = (row.particle2 || "").trim();
+      const image = (row.image || "").trim();
+      const reverse = (row.reverse || "yes").trim().toLowerCase() !== "no";
+      list.push({
+        id: `${cat}_${i}_a`,
+        sentence: [w1, "__1__", w2, "__2__", verb],
+        blank1: 1, blank2: 3,
+        answer1: p1, answer2: p2,
+        image, cat,
+      });
+      if (reverse) {
+        list.push({
+          id: `${cat}_${i}_b`,
+          sentence: [w2, "__1__", w1, "__2__", verb],
+          blank1: 1, blank2: 3,
+          answer1: p2, answer2: p1,
+          image, cat,
+        });
+      }
+    });
+    all[cat] = list;
+  });
+  return all;
+}
+
+function buildChoicesRulesFromRows(rows) {
+  return rows
+    .map(row => ({
+      particle: (row.particle || "").trim(),
+      category: (row.category || "").trim(),
+      choices: (row.choices || "").split(",").map(s => s.trim()).filter(Boolean),
+    }))
+    .filter(r => r.particle && r.choices.length > 0);
+}
+
+async function fetchCsvOrFallback(url, fallbackText) {
+  if (!url) return fallbackText;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const text = await res.text();
+    if (!text || !text.trim()) throw new Error("empty response");
+    return text;
+  } catch (e) {
+    console.warn("スプレッドシートの取得に失敗したため、内蔵データを使用します:", e);
+    return fallbackText;
+  }
+}
+
+// アプリ起動時に一度だけ呼び出し、問題データと選択肢ルールを組み立てる
+async function loadGameData() {
+  const qUrl = buildSheetCsvUrl(SHEET_CONFIG.QUESTIONS_GID);
+  const cUrl = buildSheetCsvUrl(SHEET_CONFIG.CHOICES_GID);
+
+  const [qText, cText] = await Promise.all([
+    fetchCsvOrFallback(qUrl, DEFAULT_QUESTIONS_CSV),
+    fetchCsvOrFallback(cUrl, DEFAULT_CHOICES_CSV),
+  ]);
+
+  const qRows = parseCsv(qText);
+  const cRows = parseCsv(cText);
+
+  ALL_QUESTIONS = buildAllQuestionsFromRows(qRows);
+  CHOICES_RULES = buildChoicesRulesFromRows(cRows);
+
+  QUESTION_LOOKUP = {};
+  Object.values(ALL_QUESTIONS).flat().forEach(q => { QUESTION_LOOKUP[q.id] = q; });
+
+  return { questionCount: Object.values(ALL_QUESTIONS).flat().length };
+}
+
+// image列が絵文字か画像URL（PNGなど）かを見分けて表示する
+function isImageUrl(str) {
+  if (!str) return false;
+  const s = String(str).trim();
+  return /^https?:\/\//i.test(s) || /^data:image\//i.test(s) || /\.(png|jpe?g|gif|webp|svg)(\?.*)?$/i.test(s);
+}
+
+function QuestionIcon({ src, size = 60 }) {
+  if (isImageUrl(src)) {
+    return (
+      <img
+        src={src}
+        alt=""
+        style={{ width:size, height:size, objectFit:"contain", display:"inline-block", verticalAlign:"middle" }}
+        onError={(e) => { e.target.style.display = "none"; }}
+      />
+    );
+  }
+  return <span style={{ fontSize:size, lineHeight:1 }}>{src}</span>;
+}
+
+// ─── Hanamaru ────────────────────────────────────────────────
+function Hanamaru({ visible }) {
+  if (!visible) return null;
+  return (
+    <div style={{ position:"fixed",inset:0,display:"flex",alignItems:"center",justifyContent:"center",zIndex:100,pointerEvents:"none" }}>
+      <svg width="300" height="300" viewBox="0 0 300 300" style={{ animation:"hanamaruPop 0.6s cubic-bezier(0.34,1.56,0.64,1) both" }}>
+        {[0,45,90,135,180,225,270,315].map((deg,i)=>(
+          <ellipse key={i} cx={150+108*Math.cos(deg*Math.PI/180)} cy={150+108*Math.sin(deg*Math.PI/180)} rx="18" ry="10"
+            fill={["#FF6B6B","#FFD93D","#4ECDC4","#667eea","#FF6B6B","#FFD93D","#4ECDC4","#667eea"][i]}
+            transform={`rotate(${deg},${150+108*Math.cos(deg*Math.PI/180)},${150+108*Math.sin(deg*Math.PI/180)})`} opacity="0.85"/>
+        ))}
+        <circle cx="150" cy="150" r="110" fill="none" stroke="#FF4444" strokeWidth="14" strokeLinecap="round"/>
+        <path d="M 55 120 Q 30 90 50 70" fill="none" stroke="#FF4444" strokeWidth="14" strokeLinecap="round"/>
+        <circle cx="150" cy="150" r="68" fill="white" opacity="0.92"/>
+        <text x="150" y="168" textAnchor="middle" fontSize="72" fontWeight="900" fill="#FF4444" fontFamily="serif">◎</text>
+      </svg>
+    </div>
+  );
+}
+
+function StarBurst({ count }) {
+  return (
+    <div style={{ display:"flex",gap:4,justifyContent:"center",marginTop:8 }}>
+      {Array.from({length:count}).map((_,i)=>(
+        <span key={i} style={{ fontSize:28,animation:`pop 0.3s ease ${i*0.1}s both` }}>⭐</span>
+      ))}
+    </div>
+  );
+}
+
+// ─── クイズ画面 ───────────────────────────────────────────────
+function QuizScreen({ questions, mode, onFinish }) {
+  const [current, setCurrent]     = useState(0);
+  const [phase, setPhase]         = useState(1);
+  const [sel1, setSel1]           = useState(null);
+  const [sel2, setSel2]           = useState(null);
+  const [score, setScore]         = useState(0);
+  const [shake, setShake]         = useState(false);
+  const [showHanamaru, setShowHanamaru] = useState(false);
+  const [sessionLog, setSessionLog] = useState([]);
+  const [voiceOn, setVoiceOn]     = useState(true);
+  const [showHint, setShowHint]   = useState(false);
+  const speakingRef               = useRef(false);
+
+  const q = questions[current];
+  const modeColor = mode==="mixed"?"#667eea":(CAT_CONFIG[mode]?.color||"#667eea");
+  const modeLabel = mode==="mixed"?"まじり":CAT_CONFIG[mode]?.label||"";
+
+  const correct1 = sel1 === q?.answer1;
+  const correct2 = sel2 === q?.answer2;
+  const bothCorrect = correct1 && correct2;
+
+  const shuffledChoices1 = useMemo(()=>shuffle(getChoicesFor(q?.answer1, q?.cat)),[current]);
+  const shuffledChoices2 = useMemo(()=>shuffle(getChoicesFor(q?.answer2, q?.cat)),[current, phase]);
+
+  useEffect(()=>{
+    speakingRef.current = false;
+    if(voiceOn && q){
+      const doSpeak = ()=>speakWithPauses(q);
+      if(window.speechSynthesis.getVoices().length>0) doSpeak();
+      else window.speechSynthesis.onvoiceschanged = doSpeak;
+    }
+    setShowHint(false);
+    return ()=>{ if(!speakingRef.current) window.speechSynthesis.cancel(); };
+  }, [current, voiceOn]);
+
+  function handleChoice(choice) {
+    if (phase === 1) {
+      setSel1(choice);
+      if (choice === q.answer1) {
+        setPhase(2);
+      } else {
+        setShake(true);
+        setTimeout(()=>setShake(false),500);
+        if(voiceOn) setTimeout(()=>speak(`こたえは「${q.answer1}」だよ`,0.8),300);
+        setShowHint(true);
+        setTimeout(()=>{ setSel1(null); }, 1000);
+      }
+    } else if (phase === 2) {
+      setSel2(choice);
+      if (choice === q.answer2) {
+        setPhase(3);
+        setScore(s=>s+1);
+        setShowHanamaru(true);
+        setTimeout(()=>setShowHanamaru(false),1200);
+        if(voiceOn){
+          const fullText = q.sentence.map((p,i)=>
+            i===q.blank1?q.answer1:i===q.blank2?q.answer2:p
+          ).join("");
+          setTimeout(()=>{
+            const voices=window.speechSynthesis.getVoices();
+            const jaVoice=voices.find(v=>v.lang.startsWith("ja"));
+            const makeU=(text,rate=0.85)=>{
+              const u=new SpeechSynthesisUtterance(text);
+              u.lang="ja-JP";u.rate=rate;u.pitch=1.1;
+              if(jaVoice)u.voice=jaVoice;
+              return u;
+            };
+            speakingRef.current=true;
+            window.speechSynthesis.cancel();
+            const u1=makeU(fullText);
+            u1.onend=()=>setTimeout(()=>{
+              const u2=makeU("せいかい！すごい！",0.9);
+              u2.onend=()=>{speakingRef.current=false;};
+              window.speechSynthesis.speak(u2);
+            },300);
+            window.speechSynthesis.speak(u1);
+          },200);
+        }
+        setSessionLog(prev=>[...prev,{id:q.id,correct:true}]);
+      } else {
+        setShake(true);
+        setTimeout(()=>setShake(false),500);
+        if(voiceOn) setTimeout(()=>speak(`こたえは「${q.answer2}」だよ`,0.8),300);
+        setShowHint(true);
+        setSessionLog(prev=>[...prev,{id:q.id,correct:false}]);
+        setTimeout(()=>{ setSel2(null); }, 1000);
+      }
+    }
+  }
+
+  async function handleNext() {
+    if(current+1>=questions.length){
+      const h=await loadHistory();
+      const now=new Date();
+      const dateStr=`${now.getMonth()+1}/${now.getDate()} ${now.getHours()}:${String(now.getMinutes()).padStart(2,"0")}`;
+      h.sessions.push({mode,score,total:questions.length,date:dateStr});
+      if(h.sessions.length>50)h.sessions=h.sessions.slice(-50);
+      sessionLog.forEach(({id,correct})=>{
+        if(!h.questionStats[id])h.questionStats[id]={correct:0,total:0};
+        h.questionStats[id].total++;
+        if(correct)h.questionStats[id].correct++;
+      });
+      await saveHistory(h);
+      onFinish(score,questions.length);
+    } else {
+      setCurrent(c=>c+1);
+      setPhase(1);setSel1(null);setSel2(null);setShowHint(false);
+    }
+  }
+
+  if(!q) return null;
+
+  const renderSentence = ()=>{
+    return q.sentence.map((part,i)=>{
+      if(i===q.blank1){
+        const color = sel1?(sel1===q.answer1?"#00B5A3":"#FF6B6B"):"#ccc";
+        return <span key={i} style={{ display:"inline-block",minWidth:44,borderBottom:`4px solid ${color}`,textAlign:"center",fontSize:26,fontWeight:"bold",color:sel1?(sel1===q.answer1?"#00B5A3":"#FF6B6B"):"#aaa",margin:"0 2px" }}>{sel1||"　"}</span>;
+      }
+      if(i===q.blank2){
+        const color = sel2?(sel2===q.answer2?"#00B5A3":"#FF6B6B"):phase>=2?"#ccc":"#eee";
+        return <span key={i} style={{ display:"inline-block",minWidth:44,borderBottom:`4px solid ${color}`,textAlign:"center",fontSize:26,fontWeight:"bold",color:sel2?(sel2===q.answer2?"#00B5A3":"#FF6B6B"):"#aaa",margin:"0 2px" }}>{sel2||"　"}</span>;
+      }
+      return <span key={i} style={{ fontSize:26,fontWeight:"bold",color:"#2d2d2d" }}>{part}</span>;
+    });
+  };
+
+  const currentChoices = phase===1 ? shuffledChoices1 : shuffledChoices2;
+  const currentAnswer  = phase===1 ? q.answer1 : q.answer2;
+  const currentSel     = phase===1 ? sel1 : sel2;
+
+  return (
+    <div style={S.root}>
+      <style>{globalCSS}</style>
+      <Hanamaru visible={showHanamaru}/>
+      <div style={S.progressWrap}>
+        <div style={{...S.progressBar,width:`${((current+(phase===3?1:0))/questions.length)*100}%`,background:modeColor}}/>
+      </div>
+      <div style={{...S.card,animation:shake?"shake 0.4s ease":"none"}}>
+        <div style={S.questionHeader}>
+          <span style={{ background:"#f5f0ff",color:modeColor,fontWeight:"bold",fontSize:13,padding:"3px 10px",borderRadius:20,border:`1.5px solid ${modeColor}` }}>
+            {modeLabel}
+          </span>
+          <div style={{ display:"flex",gap:8,alignItems:"center" }}>
+            <span style={S.qNum}>{current+1} / {questions.length}</span>
+            <span style={S.scoreSmall}>⭐ {score}</span>
+            <button onClick={()=>setVoiceOn(v=>!v)} style={{ background:voiceOn?"#e8f4ff":"#f0f0f0",border:"none",borderRadius:20,padding:"4px 10px",fontSize:18,cursor:"pointer",color:voiceOn?"#4A9EDB":"#bbb" }}>
+              {voiceOn?"🔊":"🔇"}
+            </button>
+          </div>
+        </div>
+
+        <div style={{ textAlign:"center",marginBottom:10 }}><QuestionIcon src={q.image} size={60}/></div>
+
+        <div style={{ display:"flex",justifyContent:"center",gap:8,marginBottom:10 }}>
+          <span style={{ fontSize:13,fontWeight:"bold",padding:"3px 12px",borderRadius:20,background:phase>=1?"#00B5A3":"#eee",color:phase>=1?"#fff":"#aaa" }}>①　1つめ</span>
+          <span style={{ fontSize:13,fontWeight:"bold",padding:"3px 12px",borderRadius:20,background:phase>=2?"#00B5A3":"#eee",color:phase>=2?"#fff":"#aaa" }}>②　2つめ</span>
+        </div>
+
+        <div style={S.sentenceBox}>{renderSentence()}</div>
+
+        <div style={{ textAlign:"center",marginBottom:8 }}>
+          <button onClick={()=>speakWithPauses(q)} style={{ background:"none",border:"2px solid #e0e0e0",borderRadius:20,padding:"5px 16px",fontSize:13,color:"#888",cursor:"pointer",display:"inline-flex",alignItems:"center",gap:4 }}>
+            🔁 もういちど　きく
+          </button>
+        </div>
+
+        {(mode!=="mixed" || showHint) && (
+          <div style={S.hintBox}>
+            💡 {buildHintText(q, phase)}
+          </div>
+        )}
+
+        {phase < 3 && (
+          <div style={S.choicesGrid}>
+            {currentChoices.map(choice=>{
+              let bg="#fff",border="3px solid #e0e0e0",col="#333";
+              return (
+                <button key={choice} onClick={()=>handleChoice(choice)} style={{
+                  ...S.choiceBtn,background:bg,border,color:col,cursor:"pointer",
+                }}>{choice}</button>
+              );
+            })}
+          </div>
+        )}
+
+        {phase===3 && (
+          <div style={{ textAlign:"center",marginTop:16 }}>
+            <p style={{ fontSize:22,fontWeight:"bold",color:"#00B5A3",marginBottom:12 }}>🎉 せいかい！</p>
+            <button style={{...S.nextBtn,background:modeColor}} onClick={handleNext}>
+              {current+1>=questions.length?"けっかをみる！":"つぎへ →"}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── 結果画面 ─────────────────────────────────────────────────
+function ResultScreen({ score, total, mode, onRetry, onHome }) {
+  const ratio=score/total;
+  const starCount=Math.round(ratio*3)||1;
+  const msgs=["もう　いちど　がんばろう！","よく　できたね！","すごい！　よくできました！","かんぺき！　すばらしい！"];
+  const modeColor=mode==="mixed"?"#667eea":(CAT_CONFIG[mode]?.color||"#667eea");
+  const modeLabel=mode==="mixed"?"まじり":CAT_CONFIG[mode]?.label||"";
+  return (
+    <div style={S.root}>
+      <style>{globalCSS}</style>
+      <div style={S.card}>
+        <div style={{ fontSize:80,textAlign:"center" }}>🎉</div>
+        <h2 style={{...S.title,fontSize:22,marginBottom:0}}>{modeLabel}　おわったよ！</h2>
+        <div style={S.scoreBox}>
+          <span style={{...S.scoreNum,color:modeColor}}>{score}</span>
+          <span style={S.scoreDen}>/ {total}</span>
+        </div>
+        <StarBurst count={starCount}/>
+        <p style={S.message}>{msgs[Math.min(Math.round(ratio*3),3)]}</p>
+        <button style={{...S.startBtn,background:modeColor}} onClick={onRetry}>もう　いちど！</button>
+        <button style={S.backBtn} onClick={onHome}>← もどる</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── タイトル画面 ─────────────────────────────────────────────
+function TitleScreen({ onStart, onRecords }) {
+  return (
+    <div style={S.root}>
+      <style>{globalCSS}</style>
+      <div style={S.card}>
+        <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,marginBottom:4 }}>
+          <button onClick={onRecords} style={{ background:"#f0f7ff",border:"none",borderRadius:10,padding:"6px 14px",fontSize:13,color:"#4A9EDB",fontWeight:"bold",cursor:"pointer",display:"inline-flex",alignItems:"center",gap:4 }}>
+            📊 きろく
+          </button>
+          <a href="mailto:marble.uehonmachi@gmail.com?subject=%E3%81%98%E3%82%87%E3%81%97%E3%82%8C%E3%82%93%E3%81%97%E3%82%85%E3%81%86%E3%82%A2%E3%83%97%E3%83%AA%E3%81%AE%E3%81%94%E6%84%8F%E8%A6%8B"
+            style={{ background:"#fff0f0",border:"none",borderRadius:10,padding:"6px 14px",fontSize:13,color:"#E8654A",fontWeight:"bold",cursor:"pointer",textDecoration:"none",display:"inline-block" }}>
+            💌 ご意見・ご感想
+          </a>
+        </div>
+
+        <div style={{ fontSize:56,textAlign:"center",marginBottom:4 }}>📝</div>
+        <h1 style={S.title}>３ごぶん　じょし</h1>
+        <p style={S.subtitle}>「は・が・を・に・で・と」を　まなぼう！</p>
+        <p style={{ fontSize:11,textAlign:"center",color:"#aaa",marginBottom:16 }}>２つの　□　に　はいる　じょしを　えらんでね</p>
+
+        <p style={{ fontSize:13,color:"#aaa",fontWeight:"bold",marginBottom:10 }}>カテゴリーを　えらぼう</p>
+        <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:14 }}>
+          {Object.entries(CAT_CONFIG).map(([cat,cfg])=>(
+            <button key={cat} onClick={()=>onStart(cat)} style={{
+              background:cfg.bg, border:`2.5px solid ${cfg.color}`,
+              borderRadius:14,padding:"12px 8px",cursor:"pointer",
+              display:"flex",flexDirection:"column",alignItems:"center",gap:4
+            }}>
+              <span style={{ fontSize:15,fontWeight:900,color:cfg.color,whiteSpace:"nowrap" }}>{cfg.label}</span>
+              <span style={{ fontSize:11,color:"#888" }}>{cfg.desc}</span>
+            </button>
+          ))}
+        </div>
+
+        <button style={S.mixedBtn} onClick={()=>onStart("mixed")}>
+          <span style={{ fontSize:22 }}>🔀</span>
+          <span style={{ fontSize:16,fontWeight:"bold",marginLeft:8 }}>まじり　れんしゅう</span>
+        </button>
+        <p style={S.meta}>それぞれ　10もん　ちょうせん</p>
+      </div>
+    </div>
+  );
+}
+
+// ─── 記録画面 ─────────────────────────────────────────────────
+function RecordsScreen({ onHome }) {
+  const [loading, setLoading] = useState(true);
+  const [errored, setErrored] = useState(false);
+  const [history, setHistory] = useState({ sessions:[], questionStats:{} });
+
+  useEffect(()=>{
+    let mounted = true;
+    (async ()=>{
+      try {
+        const h = await loadHistory();
+        if (mounted) setHistory(h);
+      } catch (e) {
+        if (mounted) setErrored(true);
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    })();
+    return ()=>{ mounted=false; };
+  }, []);
+
+  async function handleReset() {
+    const ok = window.confirm("きろくを　ぜんぶ　けしますか？\nこの　そうさは　もとに　もどせません。");
+    if (!ok) return;
+    const empty = { sessions: [], questionStats: {} };
+    const saved = await saveHistory(empty);
+    if (saved) setHistory(empty);
+  }
+
+  const sessions = [...history.sessions].reverse();
+  const totalSessions = sessions.length;
+  const totalCorrect = sessions.reduce((s,x)=>s+x.score,0);
+  const totalQs = sessions.reduce((s,x)=>s+x.total,0);
+  const avgRate = totalQs>0 ? Math.round((totalCorrect/totalQs)*100) : 0;
+
+  const weakList = Object.entries(history.questionStats)
+    .map(([id, stat]) => ({ id, ...stat, rate: stat.total>0 ? stat.correct/stat.total : 0 }))
+    .filter(x => x.total >= 2 && x.rate < 1 && QUESTION_LOOKUP[x.id])
+    .sort((a,b) => a.rate - b.rate || (a.total - b.total))
+    .slice(0, 10);
+
+  return (
+    <div style={S.root}>
+      <style>{globalCSS}</style>
+      <div style={S.card}>
+        <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12 }}>
+          <button onClick={onHome} style={S.backIconBtn}>← もどる</button>
+          <h2 style={{...S.title,fontSize:20,margin:0}}>📊 がくしゅう　きろく</h2>
+          <span style={{width:8}}/>
+        </div>
+
+        {loading && (
+          <p style={{ textAlign:"center",color:"#888",padding:"30px 0" }}>よみこみちゅう...</p>
+        )}
+
+        {!loading && errored && (
+          <p style={{ textAlign:"center",color:"#E8654A",padding:"30px 0" }}>
+            きろくを　よみこめませんでした。<br/>じかんを　おいて　もう　いちど　ためしてください。
+          </p>
+        )}
+
+        {!loading && !errored && totalSessions===0 && (
+          <p style={{ textAlign:"center",color:"#888",padding:"30px 0",lineHeight:1.8 }}>
+            まだ　きろくが　ありません。<br/>もんだいに　ちょうせんしてみよう！
+          </p>
+        )}
+
+        {!loading && !errored && totalSessions>0 && (
+          <>
+            <div style={{ display:"flex",gap:8,marginBottom:18 }}>
+              <div style={S.statBox}>
+                <div style={S.statNum}>{totalSessions}</div>
+                <div style={S.statLabel}>ちょうせん　かいすう</div>
+              </div>
+              <div style={S.statBox}>
+                <div style={{...S.statNum,color:"#00B5A3"}}>{avgRate}%</div>
+                <div style={S.statLabel}>ぜんたい　せいかいりつ</div>
+              </div>
+            </div>
+
+            <p style={S.sectionTitle}>📅 さいきんの　きろく</p>
+            <div style={{ maxHeight:190,overflowY:"auto",marginBottom:18,paddingRight:2 }}>
+              {sessions.slice(0,20).map((s,i)=>{
+                const label = s.mode==="mixed" ? "まじり" : (CAT_CONFIG[s.mode]?.label || s.mode);
+                const color = s.mode==="mixed" ? "#667eea" : (CAT_CONFIG[s.mode]?.color || "#667eea");
+                const good = s.total>0 && s.score/s.total>=0.8;
+                return (
+                  <div key={i} style={S.historyRow}>
+                    <span style={{...S.historyBadge,color,borderColor:color}}>{label}</span>
+                    <span style={S.historyDate}>{s.date}</span>
+                    <span style={{...S.historyScore,color:good?"#00B5A3":"#E8654A"}}>{s.score} / {s.total}</span>
+                  </div>
+                );
+              })}
+            </div>
+
+            {weakList.length>0 && (
+              <>
+                <p style={S.sectionTitle}>💪 にがてな　もんだい</p>
+                <div style={{ display:"flex",flexDirection:"column",gap:8,marginBottom:18 }}>
+                  {weakList.map(w=>{
+                    const q = QUESTION_LOOKUP[w.id];
+                    const text = q.sentence.map((part,i)=> i===q.blank1?q.answer1:i===q.blank2?q.answer2:part).join("");
+                    const cfg = CAT_CONFIG[q.cat];
+                    return (
+                      <div key={w.id} style={S.weakRow}>
+                        <span style={{ display:"inline-flex",alignItems:"center" }}><QuestionIcon src={q.image} size={24}/></span>
+                        <div style={{ flex:1,minWidth:0 }}>
+                          <div style={{ fontSize:14,fontWeight:"bold",color:"#444" }}>{text}</div>
+                          <div style={{ fontSize:11,color:"#aaa",marginTop:2 }}>
+                            {cfg?.label} ・ せいかい {w.correct} / {w.total} かい
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+
+            <button onClick={handleReset} style={S.resetBtn}>きろくを　リセット</button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── メインアプリ ─────────────────────────────────────────────
+function App() {
+  const [screen, setScreen]   = useState("title");
+  const [mode, setMode]       = useState(null);
+  const [questions, setQuestions] = useState([]);
+  const [lastScore, setLastScore] = useState(0);
+  const [lastTotal, setLastTotal] = useState(10);
+  const [dataState, setDataState] = useState("loading"); // loading | ready | error
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        await loadGameData();
+        if (mounted) setDataState("ready");
+      } catch (e) {
+        console.error("問題データの読み込みに失敗しました", e);
+        if (mounted) setDataState("error");
+      }
+    })();
+    return () => { mounted = false; };
+  }, []);
+
+  function buildQuestions(selectedMode) {
+    if (selectedMode==="mixed") {
+      const all = Object.values(ALL_QUESTIONS).flat();
+      return shuffle(all).slice(0,10);
+    }
+    return shuffle(ALL_QUESTIONS[selectedMode]||[]).slice(0,10);
+  }
+
+  function handleStart(selectedMode) {
+    setMode(selectedMode);
+    setQuestions(buildQuestions(selectedMode));
+    setScreen("quiz");
+  }
+
+  function handleFinish(score, total) {
+    setLastScore(score); setLastTotal(total); setScreen("result");
+  }
+
+  if (dataState === "loading") {
+    return (
+      <div style={S.root}>
+        <style>{globalCSS}</style>
+        <div style={S.card}>
+          <div style={{ fontSize:56,textAlign:"center",marginBottom:8 }}>📝</div>
+          <p style={{ textAlign:"center",color:"#888",padding:"20px 0" }}>もんだいを　よみこみちゅう...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (dataState === "error") {
+    return (
+      <div style={S.root}>
+        <style>{globalCSS}</style>
+        <div style={S.card}>
+          <div style={{ fontSize:56,textAlign:"center",marginBottom:8 }}>😢</div>
+          <p style={{ textAlign:"center",color:"#E8654A",padding:"10px 0",lineHeight:1.7 }}>
+            もんだいの　よみこみに　しっぱいしました。<br/>じかんを　おいて　もう　いちど　ためしてください。
+          </p>
+          <button style={{...S.startBtn,background:"#667eea"}} onClick={()=>{ setDataState("loading"); loadGameData().then(()=>setDataState("ready")).catch(()=>setDataState("error")); }}>
+            もう　いちど　よみこむ
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {screen==="title"  && <TitleScreen onStart={handleStart} onRecords={()=>setScreen("records")}/>}
+      {screen==="quiz"   && <QuizScreen questions={questions} mode={mode} onFinish={handleFinish}/>}
+      {screen==="result" && <ResultScreen score={lastScore} total={lastTotal} mode={mode}
+          onRetry={()=>{ setQuestions(buildQuestions(mode)); setScreen("quiz"); }}
+          onHome={()=>setScreen("title")}/>}
+      {screen==="records" && <RecordsScreen onHome={()=>setScreen("title")}/>}
+    </>
+  );
+}
+
+// ─── スタイル ─────────────────────────────────────────────────
+const S = {
+  root:{ minHeight:"100vh",backgroundColor:"#f0f4ff",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"16px",fontFamily:"'Hiragino Kaku Gothic ProN','Hiragino Sans','Meiryo',sans-serif" },
+  card:{ background:"#fff",borderRadius:24,padding:"24px 22px",width:"100%",maxWidth:480,boxShadow:"0 8px 40px rgba(0,0,0,0.10)" },
+  title:{ fontSize:28,fontWeight:900,textAlign:"center",color:"#2d2d2d",margin:"8px 0 8px",letterSpacing:"0.08em" },
+  subtitle:{ fontSize:15,textAlign:"center",color:"#666",marginBottom:8 },
+  mixedBtn:{ display:"flex",alignItems:"center",justifyContent:"center",width:"100%",padding:"14px",borderRadius:16,border:"none",background:"linear-gradient(135deg,#667eea,#764ba2)",color:"#fff",cursor:"pointer",boxShadow:"0 4px 16px rgba(102,126,234,0.35)",marginBottom:8 },
+  meta:{ textAlign:"center",color:"#bbb",fontSize:13,marginTop:8 },
+  progressWrap:{ width:"100%",maxWidth:480,height:8,background:"#e0e0e0",borderRadius:8,marginBottom:12,overflow:"hidden" },
+  progressBar:{ height:"100%",borderRadius:8,transition:"width 0.4s ease" },
+  questionHeader:{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14 },
+  qNum:{ fontSize:13,color:"#888",fontWeight:"bold" },
+  scoreSmall:{ fontSize:16,color:"#FFD93D",fontWeight:"bold" },
+  sentenceBox:{ background:"#f7f8fc",borderRadius:16,padding:"18px 14px",display:"flex",flexWrap:"wrap",justifyContent:"center",alignItems:"baseline",gap:2,marginBottom:12 },
+  hintBox:{ background:"#fffbea",border:"2px solid #FFD93D",borderRadius:12,padding:"10px 14px",fontSize:13,color:"#555",marginBottom:16,lineHeight:1.5 },
+  choicesGrid:{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:12 },
+  choiceBtn:{ padding:"20px 0",fontSize:30,fontWeight:"bold",borderRadius:16,transition:"all 0.15s ease",boxShadow:"0 2px 8px rgba(0,0,0,0.08)" },
+  nextBtn:{ padding:"14px 32px",fontSize:18,fontWeight:"bold",color:"#fff",border:"none",borderRadius:14,cursor:"pointer",boxShadow:"0 4px 14px rgba(0,0,0,0.15)" },
+  startBtn:{ display:"block",width:"100%",padding:"16px",fontSize:20,fontWeight:"bold",color:"#fff",border:"none",borderRadius:16,cursor:"pointer",letterSpacing:"0.06em",boxShadow:"0 4px 16px rgba(0,0,0,0.15)",marginBottom:10 },
+  backBtn:{ display:"block",width:"100%",padding:"12px",fontSize:16,fontWeight:"bold",color:"#888",background:"#f0f0f0",border:"none",borderRadius:14,cursor:"pointer",marginTop:4 },
+  scoreBox:{ textAlign:"center",margin:"16px 0 8px" },
+  scoreNum:{ fontSize:72,fontWeight:900 },
+  scoreDen:{ fontSize:32,color:"#aaa",marginLeft:4 },
+  message:{ fontSize:20,textAlign:"center",fontWeight:"bold",color:"#444",margin:"16px 0 24px" },
+  backIconBtn:{ background:"#f0f0f0",border:"none",borderRadius:12,padding:"6px 14px",fontSize:13,fontWeight:"bold",color:"#888",cursor:"pointer" },
+  statBox:{ flex:1,background:"#f7f8fc",borderRadius:14,padding:"12px 8px",textAlign:"center" },
+  statNum:{ fontSize:26,fontWeight:900,color:"#4A9EDB" },
+  statLabel:{ fontSize:11,color:"#999",marginTop:2 },
+  sectionTitle:{ fontSize:14,fontWeight:"bold",color:"#666",marginBottom:8 },
+  historyRow:{ display:"flex",alignItems:"center",gap:8,padding:"8px 4px",borderBottom:"1px solid #f0f0f0" },
+  historyBadge:{ fontSize:11,fontWeight:"bold",padding:"2px 8px",borderRadius:20,border:"1.5px solid",whiteSpace:"nowrap" },
+  historyDate:{ fontSize:12,color:"#aaa",flex:1 },
+  historyScore:{ fontSize:14,fontWeight:900 },
+  weakRow:{ display:"flex",alignItems:"center",gap:10,background:"#fff8f0",border:"1.5px solid #ffe4c4",borderRadius:12,padding:"10px 12px" },
+  resetBtn:{ display:"block",width:"100%",padding:"10px",fontSize:13,fontWeight:"bold",color:"#bbb",background:"#fafafa",border:"1.5px solid #eee",borderRadius:12,cursor:"pointer" },
+};
+
+const globalCSS=`
+  @keyframes shake{0%,100%{transform:translateX(0)}20%{transform:translateX(-8px)}40%{transform:translateX(8px)}60%{transform:translateX(-6px)}80%{transform:translateX(6px)}}
+  @keyframes hanamaruPop{0%{transform:scale(0) rotate(-20deg);opacity:0}60%{transform:scale(1.15) rotate(5deg);opacity:1}80%{transform:scale(0.95) rotate(-2deg)}100%{transform:scale(1) rotate(0deg);opacity:1}}
+  @keyframes pop{0%{transform:scale(0);opacity:0}80%{transform:scale(1.2)}100%{transform:scale(1);opacity:1}}
+  *{box-sizing:border-box}body{margin:0}
+`;
+
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+
+</script>
+</body>
+</html>
