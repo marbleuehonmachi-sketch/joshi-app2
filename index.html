@@ -488,18 +488,20 @@ function isImageUrl(str) {
 }
 
 function QuestionIcon({ src, size = 60 }) {
-  const [errored, setErrored] = useState(false);
-  useEffect(() => { setErrored(false); }, [src]);
+  const [attempt, setAttempt] = useState(0); // 0=元のパス, 1=imagesフォルダを試す, 2=あきらめる
+  useEffect(() => { setAttempt(0); }, [src]);
   if (!isImageUrl(src)) {
     return <span style={{ fontSize:size, lineHeight:1 }}>{src}</span>;
   }
-  if (errored) return null;
+  if (attempt >= 2) return null;
+  const baseName = src.replace(/^images\//, "");
+  const resolvedSrc = attempt === 0 ? src : ("images/" + baseName);
   return (
     <img
-      src={src}
+      src={resolvedSrc}
       alt=""
       style={{ width:size, height:size, objectFit:"contain", display:"inline-block", verticalAlign:"middle" }}
-      onError={() => setErrored(true)}
+      onError={() => setAttempt(a => a + 1)}
     />
   );
 }
