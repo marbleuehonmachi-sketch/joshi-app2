@@ -488,17 +488,20 @@ function isImageUrl(str) {
 }
 
 function QuestionIcon({ src, size = 60 }) {
-  if (isImageUrl(src)) {
-    return (
-      <img
-        src={src}
-        alt=""
-        style={{ width:size, height:size, objectFit:"contain", display:"inline-block", verticalAlign:"middle" }}
-        onError={(e) => { e.target.style.display = "none"; }}
-      />
-    );
+  const [errored, setErrored] = useState(false);
+  useEffect(() => { setErrored(false); }, [src]);
+  if (!isImageUrl(src)) {
+    return <span style={{ fontSize:size, lineHeight:1 }}>{src}</span>;
   }
-  return <span style={{ fontSize:size, lineHeight:1 }}>{src}</span>;
+  if (errored) return null;
+  return (
+    <img
+      src={src}
+      alt=""
+      style={{ width:size, height:size, objectFit:"contain", display:"inline-block", verticalAlign:"middle" }}
+      onError={() => setErrored(true)}
+    />
+  );
 }
 
 // ─── Hanamaru ────────────────────────────────────────────────
