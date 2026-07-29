@@ -375,7 +375,8 @@ function buildChoicesRulesFromRows(rows) {
 async function fetchCsvOrFallback(url, fallbackText) {
   if (!url) return fallbackText;
   try {
-    const res = await fetch(url);
+    const bustedUrl = url + (url.includes("?") ? "&" : "?") + "cachebust=" + Date.now();
+    const res = await fetch(bustedUrl, { cache: "no-store" });
     if (!res.ok) throw new Error("HTTP " + res.status);
     const text = await res.text();
     if (!text || !text.trim()) throw new Error("empty response");
