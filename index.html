@@ -990,7 +990,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App />);
 <script>
 (function () {
   var code = document.getElementById('app-source').textContent;
-  var out = Babel.transform(code, { presets: ['react'] }).code;
+  var out = Babel.transform(code, { presets: [['react', { runtime: 'classic' }]] }).code;
   (0, eval)(out);
 })();
 </script>
