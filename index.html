@@ -602,10 +602,16 @@ function QuizScreen({ questions, mode, onFinish }) {
             window.speechSynthesis.cancel();
             const u1=makeU(fullText);
             u1.onend=()=>setTimeout(()=>{
-              const u2=makeU("せいかい、すごいね！",0.95);
-              u2.pitch = 1.15;
-              u2.onend=()=>{speakingRef.current=false;};
-              window.speechSynthesis.speak(u2);
+              const praiseAudio = new Audio("seikai_sugoine.mp3");
+              praiseAudio.onended = () => { speakingRef.current=false; };
+              praiseAudio.onerror = () => {
+                // 音声ファイルが見つからない場合は、これまで通り読み上げにフォールバック
+                const u2=makeU("せいかい、すごいね！",0.95);
+                u2.pitch = 1.15;
+                u2.onend=()=>{speakingRef.current=false;};
+                window.speechSynthesis.speak(u2);
+              };
+              praiseAudio.play().catch(()=>{ speakingRef.current=false; });
             },300);
             window.speechSynthesis.speak(u1);
           },200);
@@ -796,6 +802,7 @@ function TitleScreen({ onStart, onRecords }) {
           <span style={{ fontSize:16,fontWeight:"bold",marginLeft:8 }}>まじり　れんしゅう</span>
         </button>
         <p style={S.meta}>それぞれ　10もん　ちょうせん</p>
+        <p style={{ fontSize:9,color:"#ccc",textAlign:"center",marginTop:10 }}>おんせい：VOICEVOX：春日部つむぎ</p>
       </div>
     </div>
   );
@@ -1068,4 +1075,3 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App />);
 </script>
 </body>
 </html>
-
