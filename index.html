@@ -28,6 +28,26 @@ function speak(text, rate = 0.85) {
   window.speechSynthesis.speak(utter);
 }
 
+// 助詞ごとに録音済みの「こたえは○○だよ」を再生する（8種類のみ録音済み）。
+// 録音が無い助詞や再生に失敗した場合は、これまで通りの読み上げにフォールバックする。
+const KOTAE_AUDIO_MAP = {
+  "が": "kotae_ga.mp3",
+  "を": "kotae_wo.mp3",
+  "に": "kotae_ni.mp3",
+  "で": "kotae_de.mp3",
+  "と": "kotae_to.mp3",
+  "は": "kotae_ha.mp3",
+  "も": "kotae_mo.mp3",
+  "へ": "kotae_he.mp3",
+};
+function speakKotaeWa(particle) {
+  const file = KOTAE_AUDIO_MAP[particle];
+  if (!file) { speak(`こたえは「${particle}」だよ`, 0.8); return; }
+  const a = new Audio(file);
+  a.onerror = () => speak(`こたえは「${particle}」だよ`, 0.8);
+  a.play().catch(() => speak(`こたえは「${particle}」だよ`, 0.8));
+}
+
 function speakWithPauses(q) {
   if (!window.speechSynthesis) return;
   window.speechSynthesis.cancel();
@@ -574,7 +594,7 @@ function QuizScreen({ questions, mode, onFinish }) {
       } else {
         setShake(true);
         setTimeout(()=>setShake(false),500);
-        if(voiceOn) setTimeout(()=>speak(`こたえは「${q.answer1}」だよ`,0.8),300);
+        if(voiceOn) setTimeout(()=>speakKotaeWa(q.answer1),300);
         setShowHint(true);
         setTimeout(()=>{ setSel1(null); }, 1000);
       }
@@ -620,7 +640,7 @@ function QuizScreen({ questions, mode, onFinish }) {
       } else {
         setShake(true);
         setTimeout(()=>setShake(false),500);
-        if(voiceOn) setTimeout(()=>speak(`こたえは「${q.answer2}」だよ`,0.8),300);
+        if(voiceOn) setTimeout(()=>speakKotaeWa(q.answer2),300);
         setShowHint(true);
         setSessionLog(prev=>[...prev,{id:q.id,correct:false}]);
         setTimeout(()=>{ setSel2(null); }, 1000);
