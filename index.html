@@ -33,23 +33,17 @@ function speakWithPauses(q) {
   window.speechSynthesis.cancel();
   const voices = window.speechSynthesis.getVoices();
   const jaVoice = voices.find(v => v.lang.startsWith("ja"));
-  const makeUtter = (text, rate=0.85) => {
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang="ja-JP"; u.rate=rate; u.pitch=1.1;
-    if(jaVoice) u.voice=jaVoice;
-    return u;
-  };
   // sentence: [word1, blank1, word2, blank2, verb]
-  // read word1, pause, word2, pause, verb
-  const parts = q.sentence.filter((_, i) => i % 2 === 0); // words only
+  // 単語だけを取り出し、「、」でつないで1つの発話にする。
+  // 別々に読み上げて機械的に止める方式（たどたどしく聞こえる原因）をやめ、
+  // 音声エンジン自体の自然な間（プロソディ）に任せることで滑らかにする。
+  const parts = q.sentence.filter((_, i) => i % 2 === 0); // 単語のみ
   if (parts.length === 0) return;
-  const speak_sequence = (idx) => {
-    if (idx >= parts.length) return;
-    const u = makeUtter(parts[idx]);
-    u.onend = () => setTimeout(() => speak_sequence(idx+1), idx < parts.length-1 ? 700 : 0);
-    window.speechSynthesis.speak(u);
-  };
-  speak_sequence(0);
+  const text = parts.join("、");
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = "ja-JP"; u.rate = 0.85; u.pitch = 1.1;
+  if (jaVoice) u.voice = jaVoice;
+  window.speechSynthesis.speak(u);
 }
 
 // ─── 問題データはGoogleスプレッドシートから読み込みます（下の「データ読み込み」セクション参照） ───
@@ -608,7 +602,8 @@ function QuizScreen({ questions, mode, onFinish }) {
             window.speechSynthesis.cancel();
             const u1=makeU(fullText);
             u1.onend=()=>setTimeout(()=>{
-              const u2=makeU("せいかい！すごい！",0.9);
+              const u2=makeU("せいかい、すごいね！",0.95);
+              u2.pitch = 1.15;
               u2.onend=()=>{speakingRef.current=false;};
               window.speechSynthesis.speak(u2);
             },300);
@@ -1073,4 +1068,3 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App />);
 </script>
 </body>
 </html>
-
