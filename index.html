@@ -622,7 +622,7 @@ function QuizScreen({ questions, mode, onFinish }) {
             window.speechSynthesis.cancel();
             const u1=makeU(fullText);
             u1.onend=()=>setTimeout(()=>{
-              const praiseAudio = new Audio("seikai_sugoine.mp3");
+              const praiseAudio = new Audio("praise.mp3");
               praiseAudio.onended = () => { speakingRef.current=false; };
               praiseAudio.onerror = () => {
                 // 音声ファイルが見つからない場合は、これまで通り読み上げにフォールバック
