@@ -195,7 +195,7 @@ function fetchSheetViaJsonp(gid, timeoutMs = 10000) {
       resolve(json);
     };
     const script = document.createElement("script");
-    script.src = `https://docs.google.com/spreadsheets/d/${SHEET_CONFIG.SHEET_ID}/gviz/tq?gid=${gid}&tqx=out:json;responseHandler=${cbName}&_=${Date.now()}`;
+    script.src = `https://docs.google.com/spreadsheets/d/${SHEET_CONFIG.SHEET_ID}/gviz/tq?gid=${gid}&tqx=out:json;responseHandler:${cbName}&_=${Date.now()}`;
     script.onerror = () => {
       if (done) return;
       cleanup();
