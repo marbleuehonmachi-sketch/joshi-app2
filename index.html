@@ -485,13 +485,28 @@ async function loadGameData() {
   const qRows = parseCsv(qText);
   const cRows = parseCsv(cText);
 
-  ALL_QUESTIONS = buildAllQuestionsFromRows(qRows);
-  CHOICES_RULES = buildChoicesRulesFromRows(cRows);
+  // A successful but empty or malformed sheet response must not replace the
+  // built-in questions with an empty list, which would leave the quiz blank.
+  const usableQuestionRows = qRows.filter(row =>
+    row.category && row.word1 && row.word2 && row.verb &&
+    row.particle1 && row.particle2
+  );
+  const questionRows = usableQuestionRows.length > 0
+    ? usableQuestionRows
+    : parseCsv(DEFAULT_QUESTIONS_CSV);
+  ALL_QUESTIONS = buildAllQuestionsFromRows(questionRows);
+
+  const sheetChoiceRules = buildChoicesRulesFromRows(cRows);
+  CHOICES_RULES = sheetChoiceRules.length > 0
+    ? sheetChoiceRules
+    : buildChoicesRulesFromRows(parseCsv(DEFAULT_CHOICES_CSV));
 
   QUESTION_LOOKUP = {};
   Object.values(ALL_QUESTIONS).flat().forEach(q => { QUESTION_LOOKUP[q.id] = q; });
 
-  return { questionCount: Object.values(ALL_QUESTIONS).flat().length };
+  const questionCount = Object.values(ALL_QUESTIONS).flat().length;
+  if (questionCount === 0) throw new Error("No usable questions are available");
+  return { questionCount };
 }
 
 // image列が絵文字か画像URL（PNGなど）かを見分けて表示する
@@ -668,7 +683,18 @@ function QuizScreen({ questions, mode, onFinish }) {
     }
   }
 
-  if(!q) return null;
+  if(!q) {
+    return (
+      <div style={S.root}>
+        <style>{globalCSS}</style>
+        <div style={S.card}>
+          <p style={{ textAlign:"center",color:"#E8654A",lineHeight:1.7 }}>
+            もんだいを　よみこめませんでした。<br/>トップにもどって、もういちど　ためしてください。
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   const renderSentence = ()=>{
     return q.sentence.map((part,i)=>{
@@ -988,8 +1014,13 @@ function App() {
   }
 
   function handleStart(selectedMode) {
+    const nextQuestions = buildQuestions(selectedMode);
+    if (nextQuestions.length === 0) {
+      setDataState("error");
+      return;
+    }
     setMode(selectedMode);
-    setQuestions(buildQuestions(selectedMode));
+    setQuestions(nextQuestions);
     setScreen("quiz");
   }
 
